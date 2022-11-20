@@ -22,6 +22,13 @@ pub mod sai_citizenship {
         Ok(())
     }
 
+    pub fn update_price(ctx: Context<UpdatePrice>, price: u64) -> Result<()> {
+        let state = &mut ctx.accounts.state;
+        state.price = price;
+
+        Ok(())
+    }
+
     pub fn active_sell(ctx: Context<ActiveOrDeactiveSell>) -> Result<()> {
         let state = &mut ctx.accounts.state;
 
@@ -220,6 +227,15 @@ pub struct State {
     owner: Pubkey,
     ustur_vault: Pubkey,
     proceeds_vault: Pubkey,
+}
+
+#[derive(Accounts)]
+pub struct UpdatePrice<'info> {
+    #[account(mut, has_one = owner)]
+    pub state: Account<'info, State>,
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]

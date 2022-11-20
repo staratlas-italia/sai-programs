@@ -1,5 +1,5 @@
 import * as anchor from "@project-serum/anchor";
-import { Program } from "@project-serum/anchor";
+import { AnchorError, Program } from "@project-serum/anchor";
 import { getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
 import { BN } from "bn.js";
 import { expect } from "chai";
@@ -146,6 +146,32 @@ describe("sai-citizenship", () => {
     expect(state.price.toNumber()).eq(price);
   });
 
+  it("updates the swap price", async () => {
+    const owner = anchor.web3.Keypair.generate();
+    const price = 15 * Math.pow(10, 6);
+
+    const { stateAccount } = await setupSwap(program, owner, price);
+
+    let state = await program.account.state.fetch(stateAccount.publicKey);
+
+    expect(state.price.toNumber()).eq(price);
+
+    const newPrice = 20 * Math.pow(10, 6);
+
+    await program.methods
+      .updatePrice(new BN(newPrice))
+      .accounts({
+        state: stateAccount.publicKey,
+        owner: owner.publicKey,
+      })
+      .signers([owner])
+      .rpc();
+
+    state = await program.account.state.fetch(stateAccount.publicKey);
+
+    expect(state.price.toNumber()).eq(newPrice);
+  });
+
   it("activates after active_sell is called", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15;
@@ -172,6 +198,34 @@ describe("sai-citizenship", () => {
     state = await program.account.state.fetch(stateAccount.publicKey);
 
     expect(state.active).eq(true);
+  });
+
+  it("throws an error if deactivation is called and active is false", async () => {
+    const owner = anchor.web3.Keypair.generate();
+    const price = 15;
+
+    const { stateAccount } = await setupSwap(
+      program,
+      owner,
+      price * Math.pow(10, 6)
+    );
+
+    let state = await program.account.state.fetch(stateAccount.publicKey);
+
+    expect(state.active).eq(false);
+
+    try {
+      await program.methods
+        .deactiveSell()
+        .accounts({
+          state: stateAccount.publicKey,
+          owner: owner.publicKey,
+        })
+        .signers([owner])
+        .rpc();
+    } catch (e) {
+      expect((e as AnchorError).error.errorCode.code).eq("AlreadyDeactivated");
+    }
   });
 
   it("swaps N usdc for 1 token", async () => {
@@ -384,5 +438,79 @@ describe("sai-citizenship", () => {
 
     expect(proceedsVaultBalance.value.uiAmount).eq(0);
     expect(ownerProceedsBalance.value.uiAmount).eq(price * 3);
+  });
+
+  it("explode if delinquent tries to withdraw", async () => {
+    const owner = anchor.web3.Keypair.generate();
+    const delinquent = anchor.web3.Keypair.generate();
+
+    const price = 15;
+
+    const faction = { oni: {} };
+
+    const {
+      stateAccount,
+      oniVaultPda,
+      mudVaultPda,
+      usturVaultPda,
+      proceedsVaultPda,
+      oniMint,
+      usdcMint,
+      mintOwner,
+    } = await setupAndArm(program, owner, price * Math.pow(10, 6));
+    const buyer = anchor.web3.Keypair.generate();
+
+    const {
+      buyerUsdcTokenAccount,
+      buyerOtherTokenAccount: buyerOniTokenAccount,
+    } = await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, oniMint);
+
+    const programProvider = program.provider as anchor.AnchorProvider;
+
+    await mintTo(
+      programProvider.connection,
+      mintOwner,
+      usdcMint,
+      buyerUsdcTokenAccount.address,
+      mintOwner.publicKey,
+      1000 * Math.pow(10, 6)
+    );
+
+    await program.methods
+      .swap(faction)
+      .accounts({
+        buyerInTokenAccount: buyerOniTokenAccount.address,
+        buyerOutTokenAccount: buyerUsdcTokenAccount.address,
+        state: stateAccount.publicKey,
+        buyer: buyer.publicKey,
+        oniVault: oniVaultPda,
+        mudVault: mudVaultPda,
+        usturVault: usturVaultPda,
+        proceedsVault: proceedsVaultPda,
+      })
+      .signers([buyer])
+      .rpc();
+
+    const proceedsTokenAccount = await getOrCreateAssociatedTokenAccount(
+      programProvider.connection,
+      mintOwner,
+      usdcMint,
+      delinquent.publicKey
+    );
+
+    try {
+      await program.methods
+        .withdrawProceeds()
+        .accounts({
+          state: stateAccount.publicKey,
+          proceedsVault: proceedsVaultPda,
+          ownerInTokenAccount: proceedsTokenAccount.address,
+          owner: delinquent.publicKey,
+        })
+        .signers([delinquent])
+        .rpc();
+    } catch (e) {
+      expect((e as AnchorError).error.errorCode.code).eq("ConstraintHasOne");
+    }
   });
 });
