@@ -1,10 +1,13 @@
 import * as anchor from "@project-serum/anchor";
-import { getOrCreateAssociatedTokenAccount } from "@solana/spl-token";
-import { SaiCitizenship } from "../../target/types/sai_citizenship";
+import {
+  getAssociatedTokenAddress,
+  getOrCreateAssociatedTokenAccount,
+} from "@solana/spl-token";
+import { SaiTokenSwap } from "../../target/types/sai_token_swap";
 import { airdrop } from "../airdrop";
 
 export const setupBuyerAccounts = async (
-  program: anchor.Program<SaiCitizenship>,
+  program: anchor.Program<SaiTokenSwap>,
   buyer: anchor.web3.Keypair,
   mintOwner: anchor.web3.Keypair,
   usdcMint: anchor.web3.PublicKey,
@@ -21,15 +24,13 @@ export const setupBuyerAccounts = async (
     buyer.publicKey
   );
 
-  const buyerOtherTokenAccount = await getOrCreateAssociatedTokenAccount(
-    programProvider.connection,
-    buyer,
+  const buyerOtherTokenAccount = await getAssociatedTokenAddress(
     otherTokenMint,
     buyer.publicKey
   );
 
   return {
     buyerUsdcTokenAccount,
-    buyerOtherTokenAccount,
+    buyerOtherTokenAccount: { address: buyerOtherTokenAccount },
   };
 };

@@ -1,8 +1,8 @@
 import * as anchor from "@project-serum/anchor";
-import { SaiCitizenship } from "../../target/types/sai_citizenship";
+import { SaiTokenSwap } from "../../target/types/sai_token_swap";
 
 export const airdrop = async (
-  program: anchor.Program<SaiCitizenship>,
+  program: anchor.Program<SaiTokenSwap>,
   destination: anchor.web3.PublicKey
 ) => {
   const provider = program.provider as anchor.AnchorProvider;

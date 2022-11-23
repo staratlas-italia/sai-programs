@@ -1,18 +1,23 @@
 import * as anchor from "@project-serum/anchor";
 import { AnchorError, Program } from "@project-serum/anchor";
-import { getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
+import {
+  getAssociatedTokenAddress,
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+} from "@solana/spl-token";
 import { BN } from "bn.js";
 import { expect } from "chai";
-import { SaiCitizenship } from "../target/types/sai_citizenship";
+import { createVaultPdas } from "../migrations/createVaultPdas";
+import { SaiTokenSwap } from "../target/types/sai_token_swap";
 import { airdrop } from "./airdrop";
 import { createTokenMint } from "./createMint";
-import { createVaultPdas } from "./createVaultPdas/index.ts";
 import { setupBuyerAccounts } from "./setupBuyerAccounts";
 
-const setupSwap = async (
-  program: anchor.Program<SaiCitizenship>,
+export const setupSwap = async (
+  program: anchor.Program<SaiTokenSwap>,
   owner: anchor.web3.Keypair,
-  price: number
+  price: number,
+  returnPrice: number
 ) => {
   const programProvider = program.provider as anchor.AnchorProvider;
 
@@ -27,19 +32,7 @@ const setupSwap = async (
     6
   );
 
-  const oniMint = await createTokenMint(
-    programProvider.connection,
-    mintOwner,
-    0
-  );
-
-  const mudMint = await createTokenMint(
-    programProvider.connection,
-    mintOwner,
-    0
-  );
-
-  const usturMint = await createTokenMint(
+  const tokenMint = await createTokenMint(
     programProvider.connection,
     mintOwner,
     0
@@ -47,76 +40,58 @@ const setupSwap = async (
 
   const stateAccount = anchor.web3.Keypair.generate();
 
-  const { oniVaultPda, mudVaultPda, usturVaultPda, proceedsVaultPda } =
-    await createVaultPdas(program, stateAccount.publicKey);
+  const { vaultPda, proceedsVaultPda } = await createVaultPdas(
+    program,
+    stateAccount.publicKey
+  );
 
   await program.methods
-    .initializeSwap(new BN(price))
+    .initializeSwap(new BN(price), new BN(returnPrice))
     .accounts({
       state: stateAccount.publicKey,
-      oniVault: oniVaultPda,
-      mudVault: mudVaultPda,
-      usturVault: usturVaultPda,
+      vault: vaultPda,
       proceedsVault: proceedsVaultPda,
-      oniMint,
-      mudMint,
-      usturMint,
+      mint: tokenMint,
       proceedsMint: usdcMint,
       owner: owner.publicKey,
     })
     .signers([stateAccount, owner])
     .rpc();
 
-  await Promise.all([
-    mintTo(
-      programProvider.connection,
-      mintOwner,
-      oniMint,
-      oniVaultPda,
-      mintOwner.publicKey,
-      100
-    ),
-    mintTo(
-      programProvider.connection,
-      mintOwner,
-      mudMint,
-      mudVaultPda,
-      mintOwner.publicKey,
-      100
-    ),
-    mintTo(
-      programProvider.connection,
-      mintOwner,
-      usturMint,
-      usturVaultPda,
-      mintOwner.publicKey,
-      100
-    ),
-  ]);
+  await mintTo(
+    programProvider.connection,
+    mintOwner,
+    tokenMint,
+    vaultPda,
+    mintOwner.publicKey,
+    100
+  );
 
   return {
     mintOwner,
-    mudMint,
-    mudVaultPda,
-    oniMint,
-    oniVaultPda,
+    tokenMint,
+    vaultPda,
     proceedsVaultPda,
     stateAccount,
     usdcMint,
-    usturMint,
-    usturVaultPda,
   };
 };
 
 const setupAndArm = async (
   program: anchor.Program<SaiCitizenship>,
   owner: anchor.web3.Keypair,
-  price: number
+  price: number,
+  returnPrice: number
 ) => {
-  const { stateAccount, ...rest } = await setupSwap(program, owner, price);
+  const { stateAccount, ...rest } = await setupSwap(
+    program,
+    owner,
+    price,
+    returnPrice
+  );
 
   await program.methods
-    .activeSell()
+    .startSale()
     .accounts({
       state: stateAccount.publicKey,
       owner: owner.publicKey,
@@ -127,39 +102,53 @@ const setupAndArm = async (
   return { stateAccount, ...rest };
 };
 
-describe("sai-citizenship", () => {
+describe("sai-token-swap", () => {
   // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
 
-  const program = anchor.workspace.SaiCitizenship as Program<SaiCitizenship>;
+  const program = anchor.workspace.SaiTokenSwap as Program<SaiTokenSwap>;
 
   it("initialized a swap state account", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15 * Math.pow(10, 6);
+    const returnPrice = 1;
 
-    const { stateAccount } = await setupSwap(program, owner, price);
+    const { stateAccount } = await setupSwap(
+      program,
+      owner,
+      price,
+      returnPrice
+    );
 
     const state = await program.account.state.fetch(stateAccount.publicKey);
 
     expect(state.active).eq(false);
     expect(state.owner.toString()).eq(owner.publicKey.toString());
-    expect(state.price.toNumber()).eq(price);
+    expect(state.priceProceedsMint.toNumber()).eq(price);
+    expect(state.priceVaultMint.toNumber()).eq(returnPrice);
   });
 
   it("updates the swap price", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15 * Math.pow(10, 6);
+    const returnPrice = 1;
 
-    const { stateAccount } = await setupSwap(program, owner, price);
+    const { stateAccount } = await setupSwap(
+      program,
+      owner,
+      price,
+      returnPrice
+    );
 
     let state = await program.account.state.fetch(stateAccount.publicKey);
 
-    expect(state.price.toNumber()).eq(price);
+    expect(state.priceProceedsMint.toNumber()).eq(price);
 
     const newPrice = 20 * Math.pow(10, 6);
+    const newReturnPrice = 2;
 
     await program.methods
-      .updatePrice(new BN(newPrice))
+      .updatePrices(new BN(newPrice), new BN(newReturnPrice))
       .accounts({
         state: stateAccount.publicKey,
         owner: owner.publicKey,
@@ -169,17 +158,20 @@ describe("sai-citizenship", () => {
 
     state = await program.account.state.fetch(stateAccount.publicKey);
 
-    expect(state.price.toNumber()).eq(newPrice);
+    expect(state.priceProceedsMint.toNumber()).eq(newPrice);
+    expect(state.priceVaultMint.toNumber()).eq(newReturnPrice);
   });
 
   it("activates after active_sell is called", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15;
+    const returnPrice = 1;
 
     const { stateAccount } = await setupSwap(
       program,
       owner,
-      price * Math.pow(10, 6)
+      price * Math.pow(10, 6),
+      returnPrice
     );
 
     let state = await program.account.state.fetch(stateAccount.publicKey);
@@ -187,7 +179,7 @@ describe("sai-citizenship", () => {
     expect(state.active).eq(false);
 
     await program.methods
-      .activeSell()
+      .startSale()
       .accounts({
         state: stateAccount.publicKey,
         owner: owner.publicKey,
@@ -203,11 +195,13 @@ describe("sai-citizenship", () => {
   it("throws an error if deactivation is called and active is false", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15;
+    const returnPrice = 1;
 
     const { stateAccount } = await setupSwap(
       program,
       owner,
-      price * Math.pow(10, 6)
+      price * Math.pow(10, 6),
+      returnPrice
     );
 
     let state = await program.account.state.fetch(stateAccount.publicKey);
@@ -216,7 +210,7 @@ describe("sai-citizenship", () => {
 
     try {
       await program.methods
-        .deactiveSell()
+        .stopSale()
         .accounts({
           state: stateAccount.publicKey,
           owner: owner.publicKey,
@@ -224,7 +218,7 @@ describe("sai-citizenship", () => {
         .signers([owner])
         .rpc();
     } catch (e) {
-      expect((e as AnchorError).error.errorCode.code).eq("AlreadyDeactivated");
+      expect((e as AnchorError).error.errorCode.code).eq("AlreadyStopped");
     }
   });
 
@@ -232,25 +226,20 @@ describe("sai-citizenship", () => {
     const owner = anchor.web3.Keypair.generate();
 
     const price = 15;
-
-    const faction = { oni: {} };
+    const returnPrice = 1;
 
     const {
       stateAccount,
-      oniVaultPda,
-      mudVaultPda,
-      usturVaultPda,
+      vaultPda,
+      tokenMint,
       proceedsVaultPda,
-      oniMint,
       usdcMint,
       mintOwner,
-    } = await setupAndArm(program, owner, price * Math.pow(10, 6));
+    } = await setupAndArm(program, owner, price * Math.pow(10, 6), returnPrice);
     const buyer = anchor.web3.Keypair.generate();
 
-    const {
-      buyerUsdcTokenAccount,
-      buyerOtherTokenAccount: buyerOniTokenAccount,
-    } = await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, oniMint);
+    const { buyerUsdcTokenAccount, buyerOtherTokenAccount } =
+      await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, tokenMint);
 
     const programProvider = program.provider as anchor.AnchorProvider;
 
@@ -264,15 +253,14 @@ describe("sai-citizenship", () => {
     );
 
     await program.methods
-      .swap(faction)
+      .swap()
       .accounts({
-        buyerInTokenAccount: buyerOniTokenAccount.address,
+        mint: tokenMint,
+        buyerInTokenAccount: buyerOtherTokenAccount.address,
         buyerOutTokenAccount: buyerUsdcTokenAccount.address,
         state: stateAccount.publicKey,
         buyer: buyer.publicKey,
-        oniVault: oniVaultPda,
-        mudVault: mudVaultPda,
-        usturVault: usturVaultPda,
+        vault: vaultPda,
         proceedsVault: proceedsVaultPda,
       })
       .signers([buyer])
@@ -282,15 +270,15 @@ describe("sai-citizenship", () => {
       buyerUsdcTokenAccount.address
     );
 
-    const oniTokenBalance =
+    const otherTokenBalance =
       await programProvider.connection.getTokenAccountBalance(
-        buyerOniTokenAccount.address
+        buyerOtherTokenAccount.address
       );
 
     const proceedsVaultBalance =
       await programProvider.connection.getTokenAccountBalance(proceedsVaultPda);
 
-    expect(oniTokenBalance.value.uiAmount).eq(1);
+    expect(otherTokenBalance.value.uiAmount).eq(1);
     expect(usdcBalance.value.uiAmount).eq(1000 - price);
     expect(proceedsVaultBalance.value.uiAmount).eq(price);
   });
@@ -299,32 +287,33 @@ describe("sai-citizenship", () => {
     const owner = anchor.web3.Keypair.generate();
 
     const price = 15;
+    const returnPrice = 1;
 
     const {
       stateAccount,
-      oniVaultPda,
-      mudVaultPda,
-      usturVaultPda,
+      vaultPda,
       proceedsVaultPda,
-      oniMint,
+      tokenMint,
       usdcMint,
       mintOwner,
-      mudMint,
-      usturMint,
-    } = await setupAndArm(program, owner, price * Math.pow(10, 6));
+    } = await setupAndArm(program, owner, price * Math.pow(10, 6), returnPrice);
 
     const buyer = anchor.web3.Keypair.generate();
+    const buyer2 = anchor.web3.Keypair.generate();
+
+    const { buyerUsdcTokenAccount, buyerOtherTokenAccount: buyerTokenAccount } =
+      await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, tokenMint);
 
     const {
-      buyerUsdcTokenAccount,
-      buyerOtherTokenAccount: buyerOniTokenAccount,
-    } = await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, oniMint);
-
-    const { buyerOtherTokenAccount: buyerMudTokenAccount } =
-      await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, mudMint);
-
-    const { buyerOtherTokenAccount: buyerUsturTokenAccount } =
-      await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, usturMint);
+      buyerUsdcTokenAccount: buyer2UsdcTokenAccount,
+      buyerOtherTokenAccount: buyer2TokenAccount,
+    } = await setupBuyerAccounts(
+      program,
+      buyer2,
+      mintOwner,
+      usdcMint,
+      tokenMint
+    );
 
     const programProvider = program.provider as anchor.AnchorProvider;
 
@@ -337,82 +326,73 @@ describe("sai-citizenship", () => {
       1000 * Math.pow(10, 6)
     );
 
-    await program.methods
-      .swap({ oni: {} })
-      .accounts({
-        buyerInTokenAccount: buyerOniTokenAccount.address,
-        buyerOutTokenAccount: buyerUsdcTokenAccount.address,
-        state: stateAccount.publicKey,
-        buyer: buyer.publicKey,
-        oniVault: oniVaultPda,
-        mudVault: mudVaultPda,
-        usturVault: usturVaultPda,
-        proceedsVault: proceedsVaultPda,
-      })
-      .signers([buyer])
-      .rpc();
-
-    await program.methods
-      .swap({ mud: {} })
-      .accounts({
-        buyerInTokenAccount: buyerMudTokenAccount.address,
-        buyerOutTokenAccount: buyerUsdcTokenAccount.address,
-        state: stateAccount.publicKey,
-        buyer: buyer.publicKey,
-        oniVault: oniVaultPda,
-        mudVault: mudVaultPda,
-        usturVault: usturVaultPda,
-        proceedsVault: proceedsVaultPda,
-      })
-      .signers([buyer])
-      .rpc();
-
-    await program.methods
-      .swap({ ustur: {} })
-      .accounts({
-        buyerInTokenAccount: buyerUsturTokenAccount.address,
-        buyerOutTokenAccount: buyerUsdcTokenAccount.address,
-        state: stateAccount.publicKey,
-        buyer: buyer.publicKey,
-        oniVault: oniVaultPda,
-        mudVault: mudVaultPda,
-        usturVault: usturVaultPda,
-        proceedsVault: proceedsVaultPda,
-      })
-      .signers([buyer])
-      .rpc();
-
-    const usdcBalance = await programProvider.connection.getTokenAccountBalance(
-      buyerUsdcTokenAccount.address
+    await mintTo(
+      programProvider.connection,
+      mintOwner,
+      usdcMint,
+      buyer2UsdcTokenAccount.address,
+      mintOwner.publicKey,
+      1000 * Math.pow(10, 6)
     );
 
-    const oniTokenBalance =
+    await program.methods
+      .swap()
+      .accounts({
+        buyerInTokenAccount: buyerTokenAccount.address,
+        buyerOutTokenAccount: buyerUsdcTokenAccount.address,
+        state: stateAccount.publicKey,
+        buyer: buyer.publicKey,
+        vault: vaultPda,
+        proceedsVault: proceedsVaultPda,
+        mint: tokenMint,
+      })
+      .signers([buyer])
+      .rpc();
+
+    await program.methods
+      .swap()
+      .accounts({
+        buyerInTokenAccount: buyer2TokenAccount.address,
+        buyerOutTokenAccount: buyer2UsdcTokenAccount.address,
+        state: stateAccount.publicKey,
+        buyer: buyer2.publicKey,
+        vault: vaultPda,
+        proceedsVault: proceedsVaultPda,
+        mint: tokenMint,
+      })
+      .signers([buyer2])
+      .rpc();
+
+    const buyerUsdcBalance =
       await programProvider.connection.getTokenAccountBalance(
-        buyerOniTokenAccount.address
+        buyerUsdcTokenAccount.address
       );
 
-    const mudTokenBalance =
+    const buyer2UsdcBalance =
       await programProvider.connection.getTokenAccountBalance(
-        buyerMudTokenAccount.address
+        buyer2UsdcTokenAccount.address
       );
 
-    const usturTokenBalance =
+    const buyerTokenBalance =
       await programProvider.connection.getTokenAccountBalance(
-        buyerUsturTokenAccount.address
+        buyerTokenAccount.address
+      );
+
+    const buyer2TokenBalance =
+      await programProvider.connection.getTokenAccountBalance(
+        buyer2TokenAccount.address
       );
 
     let proceedsVaultBalance =
       await programProvider.connection.getTokenAccountBalance(proceedsVaultPda);
 
-    expect(oniTokenBalance.value.uiAmount).eq(1);
-    expect(mudTokenBalance.value.uiAmount).eq(1);
-    expect(usturTokenBalance.value.uiAmount).eq(1);
-    expect(usdcBalance.value.uiAmount).eq(1000 - price * 3);
-    expect(proceedsVaultBalance.value.uiAmount).eq(price * 3);
+    expect(buyerTokenBalance.value.uiAmount).eq(1);
+    expect(buyer2TokenBalance.value.uiAmount).eq(1);
+    expect(buyerUsdcBalance.value.uiAmount).eq(1000 - price);
+    expect(buyer2UsdcBalance.value.uiAmount).eq(1000 - price);
+    expect(proceedsVaultBalance.value.uiAmount).eq(price * 2);
 
-    const proceedsTokenAccount = await getOrCreateAssociatedTokenAccount(
-      programProvider.connection,
-      mintOwner,
+    const proceedsTokenAccountAddress = await getAssociatedTokenAddress(
       usdcMint,
       owner.publicKey
     );
@@ -422,8 +402,9 @@ describe("sai-citizenship", () => {
       .accounts({
         state: stateAccount.publicKey,
         proceedsVault: proceedsVaultPda,
-        ownerInTokenAccount: proceedsTokenAccount.address,
+        ownerInTokenAccount: proceedsTokenAccountAddress,
         owner: owner.publicKey,
+        mint: usdcMint,
       })
       .signers([owner])
       .rpc();
@@ -433,11 +414,11 @@ describe("sai-citizenship", () => {
 
     const ownerProceedsBalance =
       await programProvider.connection.getTokenAccountBalance(
-        proceedsTokenAccount.address
+        proceedsTokenAccountAddress
       );
 
     expect(proceedsVaultBalance.value.uiAmount).eq(0);
-    expect(ownerProceedsBalance.value.uiAmount).eq(price * 3);
+    expect(ownerProceedsBalance.value.uiAmount).eq(price * 2);
   });
 
   it("explode if delinquent tries to withdraw", async () => {
@@ -445,25 +426,20 @@ describe("sai-citizenship", () => {
     const delinquent = anchor.web3.Keypair.generate();
 
     const price = 15;
-
-    const faction = { oni: {} };
+    const returnPrice = 15;
 
     const {
       stateAccount,
-      oniVaultPda,
-      mudVaultPda,
-      usturVaultPda,
+      vaultPda,
       proceedsVaultPda,
-      oniMint,
+      tokenMint,
       usdcMint,
       mintOwner,
-    } = await setupAndArm(program, owner, price * Math.pow(10, 6));
+    } = await setupAndArm(program, owner, price * Math.pow(10, 6), returnPrice);
     const buyer = anchor.web3.Keypair.generate();
 
-    const {
-      buyerUsdcTokenAccount,
-      buyerOtherTokenAccount: buyerOniTokenAccount,
-    } = await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, oniMint);
+    const { buyerUsdcTokenAccount, buyerOtherTokenAccount } =
+      await setupBuyerAccounts(program, buyer, mintOwner, usdcMint, tokenMint);
 
     const programProvider = program.provider as anchor.AnchorProvider;
 
@@ -477,16 +453,15 @@ describe("sai-citizenship", () => {
     );
 
     await program.methods
-      .swap(faction)
+      .swap()
       .accounts({
-        buyerInTokenAccount: buyerOniTokenAccount.address,
+        buyerInTokenAccount: buyerOtherTokenAccount.address,
         buyerOutTokenAccount: buyerUsdcTokenAccount.address,
         state: stateAccount.publicKey,
         buyer: buyer.publicKey,
-        oniVault: oniVaultPda,
-        mudVault: mudVaultPda,
-        usturVault: usturVaultPda,
+        vault: vaultPda,
         proceedsVault: proceedsVaultPda,
+        mint: tokenMint,
       })
       .signers([buyer])
       .rpc();
@@ -506,6 +481,7 @@ describe("sai-citizenship", () => {
           proceedsVault: proceedsVaultPda,
           ownerInTokenAccount: proceedsTokenAccount.address,
           owner: delinquent.publicKey,
+          mint: usdcMint,
         })
         .signers([delinquent])
         .rpc();
