@@ -16,8 +16,7 @@ import { setupBuyerAccounts } from "./setupBuyerAccounts";
 export const setupSwap = async (
   program: anchor.Program<SaiTokenSwap>,
   owner: anchor.web3.Keypair,
-  price: number,
-  returnPrice: number
+  price: number
 ) => {
   const programProvider = program.provider as anchor.AnchorProvider;
 
@@ -46,7 +45,7 @@ export const setupSwap = async (
   );
 
   await program.methods
-    .initializeSwap(new BN(price), new BN(returnPrice))
+    .initializeSwap(new BN(price))
     .accounts({
       state: stateAccount.publicKey,
       vault: vaultPda,
@@ -78,17 +77,11 @@ export const setupSwap = async (
 };
 
 const setupAndArm = async (
-  program: anchor.Program<SaiCitizenship>,
+  program: anchor.Program<SaiTokenSwap>,
   owner: anchor.web3.Keypair,
-  price: number,
-  returnPrice: number
+  price: number
 ) => {
-  const { stateAccount, ...rest } = await setupSwap(
-    program,
-    owner,
-    price,
-    returnPrice
-  );
+  const { stateAccount, ...rest } = await setupSwap(program, owner, price);
 
   await program.methods
     .startSale()
@@ -111,44 +104,30 @@ describe("sai-token-swap", () => {
   it("initialized a swap state account", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15 * Math.pow(10, 6);
-    const returnPrice = 1;
 
-    const { stateAccount } = await setupSwap(
-      program,
-      owner,
-      price,
-      returnPrice
-    );
+    const { stateAccount } = await setupSwap(program, owner, price);
 
     const state = await program.account.state.fetch(stateAccount.publicKey);
 
     expect(state.active).eq(false);
     expect(state.owner.toString()).eq(owner.publicKey.toString());
-    expect(state.priceProceedsMint.toNumber()).eq(price);
-    expect(state.priceVaultMint.toNumber()).eq(returnPrice);
+    expect(state.price.toNumber()).eq(price);
   });
 
   it("updates the swap price", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15 * Math.pow(10, 6);
-    const returnPrice = 1;
 
-    const { stateAccount } = await setupSwap(
-      program,
-      owner,
-      price,
-      returnPrice
-    );
+    const { stateAccount } = await setupSwap(program, owner, price);
 
     let state = await program.account.state.fetch(stateAccount.publicKey);
 
-    expect(state.priceProceedsMint.toNumber()).eq(price);
+    expect(state.price.toNumber()).eq(price);
 
     const newPrice = 20 * Math.pow(10, 6);
-    const newReturnPrice = 2;
 
     await program.methods
-      .updatePrices(new BN(newPrice), new BN(newReturnPrice))
+      .updatePrice(new BN(newPrice))
       .accounts({
         state: stateAccount.publicKey,
         owner: owner.publicKey,
@@ -158,20 +137,17 @@ describe("sai-token-swap", () => {
 
     state = await program.account.state.fetch(stateAccount.publicKey);
 
-    expect(state.priceProceedsMint.toNumber()).eq(newPrice);
-    expect(state.priceVaultMint.toNumber()).eq(newReturnPrice);
+    expect(state.price.toNumber()).eq(newPrice);
   });
 
   it("activates after active_sell is called", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15;
-    const returnPrice = 1;
 
     const { stateAccount } = await setupSwap(
       program,
       owner,
-      price * Math.pow(10, 6),
-      returnPrice
+      price * Math.pow(10, 6)
     );
 
     let state = await program.account.state.fetch(stateAccount.publicKey);
@@ -195,13 +171,11 @@ describe("sai-token-swap", () => {
   it("throws an error if deactivation is called and active is false", async () => {
     const owner = anchor.web3.Keypair.generate();
     const price = 15;
-    const returnPrice = 1;
 
     const { stateAccount } = await setupSwap(
       program,
       owner,
-      price * Math.pow(10, 6),
-      returnPrice
+      price * Math.pow(10, 6)
     );
 
     let state = await program.account.state.fetch(stateAccount.publicKey);
@@ -226,7 +200,6 @@ describe("sai-token-swap", () => {
     const owner = anchor.web3.Keypair.generate();
 
     const price = 15;
-    const returnPrice = 1;
 
     const {
       stateAccount,
@@ -235,7 +208,7 @@ describe("sai-token-swap", () => {
       proceedsVaultPda,
       usdcMint,
       mintOwner,
-    } = await setupAndArm(program, owner, price * Math.pow(10, 6), returnPrice);
+    } = await setupAndArm(program, owner, price * Math.pow(10, 6));
     const buyer = anchor.web3.Keypair.generate();
 
     const { buyerUsdcTokenAccount, buyerOtherTokenAccount } =
@@ -253,7 +226,7 @@ describe("sai-token-swap", () => {
     );
 
     await program.methods
-      .swap()
+      .swap(new BN(2))
       .accounts({
         mint: tokenMint,
         buyerInTokenAccount: buyerOtherTokenAccount.address,
@@ -278,16 +251,15 @@ describe("sai-token-swap", () => {
     const proceedsVaultBalance =
       await programProvider.connection.getTokenAccountBalance(proceedsVaultPda);
 
-    expect(otherTokenBalance.value.uiAmount).eq(1);
-    expect(usdcBalance.value.uiAmount).eq(1000 - price);
-    expect(proceedsVaultBalance.value.uiAmount).eq(price);
+    expect(otherTokenBalance.value.uiAmount).eq(2);
+    expect(usdcBalance.value.uiAmount).eq(970);
+    expect(proceedsVaultBalance.value.uiAmount).eq(30);
   });
 
   it("withdraw all the proceeds", async () => {
     const owner = anchor.web3.Keypair.generate();
 
     const price = 15;
-    const returnPrice = 1;
 
     const {
       stateAccount,
@@ -296,7 +268,7 @@ describe("sai-token-swap", () => {
       tokenMint,
       usdcMint,
       mintOwner,
-    } = await setupAndArm(program, owner, price * Math.pow(10, 6), returnPrice);
+    } = await setupAndArm(program, owner, price * Math.pow(10, 6));
 
     const buyer = anchor.web3.Keypair.generate();
     const buyer2 = anchor.web3.Keypair.generate();
@@ -336,7 +308,7 @@ describe("sai-token-swap", () => {
     );
 
     await program.methods
-      .swap()
+      .swap(new BN(1))
       .accounts({
         buyerInTokenAccount: buyerTokenAccount.address,
         buyerOutTokenAccount: buyerUsdcTokenAccount.address,
@@ -350,7 +322,7 @@ describe("sai-token-swap", () => {
       .rpc();
 
     await program.methods
-      .swap()
+      .swap(new BN(1))
       .accounts({
         buyerInTokenAccount: buyer2TokenAccount.address,
         buyerOutTokenAccount: buyer2UsdcTokenAccount.address,
@@ -388,9 +360,9 @@ describe("sai-token-swap", () => {
 
     expect(buyerTokenBalance.value.uiAmount).eq(1);
     expect(buyer2TokenBalance.value.uiAmount).eq(1);
-    expect(buyerUsdcBalance.value.uiAmount).eq(1000 - price);
-    expect(buyer2UsdcBalance.value.uiAmount).eq(1000 - price);
-    expect(proceedsVaultBalance.value.uiAmount).eq(price * 2);
+    expect(buyerUsdcBalance.value.uiAmount).eq(985);
+    expect(buyer2UsdcBalance.value.uiAmount).eq(985);
+    expect(proceedsVaultBalance.value.uiAmount).eq(30);
 
     const proceedsTokenAccountAddress = await getAssociatedTokenAddress(
       usdcMint,
@@ -421,12 +393,60 @@ describe("sai-token-swap", () => {
     expect(ownerProceedsBalance.value.uiAmount).eq(price * 2);
   });
 
+  it("withdraw all from the vault amount", async () => {
+    const owner = anchor.web3.Keypair.generate();
+
+    const price = 15;
+
+    const { stateAccount, vaultPda, tokenMint } = await setupSwap(
+      program,
+      owner,
+      price * Math.pow(10, 6)
+    );
+
+    const programProvider = program.provider as anchor.AnchorProvider;
+
+    let vaultBalance = await programProvider.connection.getTokenAccountBalance(
+      vaultPda
+    );
+
+    expect(vaultBalance.value.uiAmount).eq(100);
+
+    const vaultTokenAccountAddress = await getAssociatedTokenAddress(
+      tokenMint,
+      owner.publicKey
+    );
+
+    await program.methods
+      .withdraw()
+      .accounts({
+        state: stateAccount.publicKey,
+        vault: vaultPda,
+        ownerInTokenAccount: vaultTokenAccountAddress,
+        owner: owner.publicKey,
+        mint: tokenMint,
+      })
+      .signers([owner])
+      .rpc();
+
+    vaultBalance = await programProvider.connection.getTokenAccountBalance(
+      vaultPda
+    );
+
+    const ownerProceedsBalance =
+      await programProvider.connection.getTokenAccountBalance(
+        vaultTokenAccountAddress
+      );
+
+    expect(vaultBalance.value.uiAmount).eq(0);
+    expect(ownerProceedsBalance.value.uiAmount).eq(100);
+  });
+
   it("explode if delinquent tries to withdraw", async () => {
     const owner = anchor.web3.Keypair.generate();
     const delinquent = anchor.web3.Keypair.generate();
 
     const price = 15;
-    const returnPrice = 15;
 
     const {
       stateAccount,
@@ -435,7 +455,7 @@ describe("sai-token-swap", () => {
       tokenMint,
       usdcMint,
       mintOwner,
-    } = await setupAndArm(program, owner, price * Math.pow(10, 6), returnPrice);
+    } = await setupAndArm(program, owner, price * Math.pow(10, 6));
     const buyer = anchor.web3.Keypair.generate();
 
     const { buyerUsdcTokenAccount, buyerOtherTokenAccount } =
@@ -453,7 +473,7 @@ describe("sai-token-swap", () => {
     );
 
     await program.methods
-      .swap()
+      .swap(new BN(1))
       .accounts({
         buyerInTokenAccount: buyerOtherTokenAccount.address,
         buyerOutTokenAccount: buyerUsdcTokenAccount.address,

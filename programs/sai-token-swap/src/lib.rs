@@ -11,15 +11,8 @@ pub mod sai_token_swap {
 
     use super::*;
 
-    pub fn initialize_swap(
-        ctx: Context<InitializeSwap>,
-        price_proceeds_mint: u64,
-        price_vault_mint: u64,
-    ) -> Result<()> {
-        require!(
-            price_proceeds_mint > 0 && price_vault_mint > 0,
-            SaiCitizenshipError::InvalidPrice
-        );
+    pub fn initialize_swap(ctx: Context<InitializeSwap>, price: u64) -> Result<()> {
+        require!(price > 0, SaiTokenSwapError::InvalidPrice);
 
         let state = &mut ctx.accounts.state;
         state.active = false;
@@ -29,33 +22,24 @@ pub mod sai_token_swap {
         state.vault_bump = *ctx
             .bumps
             .get("vault")
-            .ok_or_else(|| error!(SaiCitizenshipError::BumpSeedNotInHashMap))?;
+            .ok_or_else(|| error!(SaiTokenSwapError::BumpSeedNotInHashMap))?;
 
         state.proceeds_bump = *ctx
             .bumps
             .get("proceeds_vault")
-            .ok_or_else(|| error!(SaiCitizenshipError::BumpSeedNotInHashMap))?;
+            .ok_or_else(|| error!(SaiTokenSwapError::BumpSeedNotInHashMap))?;
 
         state.proceeds_vault = ctx.accounts.proceeds_vault.key();
-        state.price_proceeds_mint = price_proceeds_mint;
-        state.price_vault_mint = price_vault_mint;
+        state.price = price;
 
         Ok(())
     }
 
-    pub fn update_prices(
-        ctx: Context<UpdatePrice>,
-        price_proceeds_mint: u64,
-        price_vault_mint: u64,
-    ) -> Result<()> {
-        require!(
-            price_proceeds_mint > 0 && price_vault_mint > 0,
-            SaiCitizenshipError::InvalidPrice
-        );
+    pub fn update_price(ctx: Context<UpdatePrice>, price: u64) -> Result<()> {
+        require!(price > 0, SaiTokenSwapError::InvalidPrice);
 
         let state = &mut ctx.accounts.state;
-        state.price_proceeds_mint = price_proceeds_mint;
-        state.price_vault_mint = price_vault_mint;
+        state.price = price;
 
         Ok(())
     }
@@ -63,7 +47,7 @@ pub mod sai_token_swap {
     pub fn start_sale(ctx: Context<UpdateSale>) -> Result<()> {
         let state = &mut ctx.accounts.state;
 
-        require!(!state.active, SaiCitizenshipError::AlreadyStarted);
+        require!(!state.active, SaiTokenSwapError::AlreadyStarted);
 
         state.active = true;
 
@@ -73,33 +57,38 @@ pub mod sai_token_swap {
     pub fn stop_sale(ctx: Context<UpdateSale>) -> Result<()> {
         let state = &mut ctx.accounts.state;
 
-        require!(state.active, SaiCitizenshipError::AlreadyStopped);
+        require!(state.active, SaiTokenSwapError::AlreadyStopped);
 
         state.active = false;
 
         Ok(())
     }
 
-    pub fn swap(ctx: Context<Swap>) -> Result<()> {
+    pub fn swap(ctx: Context<Swap>, amount: u64) -> Result<()> {
         let state = &ctx.accounts.state;
 
-        require!(state.active, SaiCitizenshipError::SaleNotStarted);
+        require!(state.active, SaiTokenSwapError::SaleNotStarted);
 
         require_keys_eq!(
             ctx.accounts.buyer_in_token_account.mint,
             ctx.accounts.mint.key(),
-            SaiCitizenshipError::InvalidSwapDestination
+            SaiTokenSwapError::InvalidSwapDestination
         );
 
         require!(
-            ctx.accounts.buyer_out_token_account.amount >= state.price_proceeds_mint,
-            SaiCitizenshipError::NotEnoughFunds
+            ctx.accounts.buyer_out_token_account.amount >= state.price,
+            SaiTokenSwapError::NotEnoughFunds
         );
 
         require!(
-            ctx.accounts.vault.amount >= 1,
-            SaiCitizenshipError::InsolventVault
+            ctx.accounts.vault.amount >= amount,
+            SaiTokenSwapError::InsolventVault
         );
+
+        let total_price = state
+            .price
+            .checked_mul(amount)
+            .ok_or(SaiTokenSwapError::InvalidCalculation)?;
 
         token::transfer(
             CpiContext::new(
@@ -110,7 +99,7 @@ pub mod sai_token_swap {
                     authority: ctx.accounts.buyer.to_account_info(),
                 },
             ),
-            state.price_proceeds_mint,
+            total_price,
         )?;
 
         let state_key = state.key();
@@ -127,7 +116,7 @@ pub mod sai_token_swap {
                 },
                 &[seeds],
             ),
-            state.price_vault_mint,
+            amount,
         )?;
 
         Ok(())
@@ -136,13 +125,13 @@ pub mod sai_token_swap {
     pub fn withdraw_proceeds(ctx: Context<WithdrawProceeds>) -> Result<()> {
         require!(
             ctx.accounts.proceeds_vault.amount > 0,
-            SaiCitizenshipError::InsolventProceedsVault
+            SaiTokenSwapError::InsolventProceedsVault
         );
 
         require_keys_eq!(
             ctx.accounts.proceeds_vault.mint,
             ctx.accounts.mint.key(),
-            SaiCitizenshipError::InvalidWithdrawDestination
+            SaiTokenSwapError::InvalidWithdrawDestination
         );
 
         let state = &ctx.accounts.state;
@@ -165,6 +154,43 @@ pub mod sai_token_swap {
                 &[seeds],
             ),
             ctx.accounts.proceeds_vault.amount,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn withdraw(ctx: Context<Withdraw>) -> Result<()> {
+        require!(
+            ctx.accounts.vault.amount > 0,
+            SaiTokenSwapError::InsolventVault
+        );
+
+        require_keys_eq!(
+            ctx.accounts.vault.mint,
+            ctx.accounts.mint.key(),
+            SaiTokenSwapError::InvalidWithdrawDestination
+        );
+
+        let state = &ctx.accounts.state;
+        let state_key = state.key();
+
+        let seeds = &[
+            b"vault".as_ref(),
+            state_key.as_ref(),
+            &[state.proceeds_bump],
+        ];
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.owner_in_token_account.to_account_info(),
+                    authority: ctx.accounts.vault.to_account_info(),
+                },
+                &[seeds],
+            ),
+            ctx.accounts.vault.amount,
         )?;
 
         Ok(())
@@ -209,8 +235,7 @@ pub struct InitializeSwap<'info> {
 #[account]
 pub struct State {
     active: bool,
-    price_proceeds_mint: u64,
-    price_vault_mint: u64,
+    price: u64,
     vault: Pubkey,
     vault_bump: u8,
     owner: Pubkey,
@@ -304,13 +329,40 @@ pub struct WithdrawProceeds<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
+#[derive(Accounts)]
+pub struct Withdraw<'info> {
+    #[account(
+        mut,
+        has_one= owner,
+        has_one = vault,
+    )]
+    pub state: Box<Account<'info, State>>,
+    #[account(mut)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(
+        init_if_needed,
+        payer = owner,
+        associated_token::mint = mint,
+        associated_token::authority = owner
+    )]
+    pub owner_in_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    pub mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
 #[error_code]
-pub enum SaiCitizenshipError {
+pub enum SaiTokenSwapError {
     AlreadyStarted,
     AlreadyStopped,
     BumpSeedNotInHashMap,
     InsolventProceedsVault,
     InsolventVault,
+    InvalidCalculation,
     InvalidPrice,
     InvalidSwapDestination,
     InvalidWithdrawDestination,

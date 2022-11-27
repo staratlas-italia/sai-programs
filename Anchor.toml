@@ -4,6 +4,7 @@ skip-lint = false
 
 [programs.localnet]
 sai_token_swap = "DCcmLPojwSQN72iuRJmER1NGmnnoFbfZyG1k7nQpEdXA"
+sai_community_program = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
 
 [programs.devnet]
 sai_token_swap = "DCcmLPojwSQN72iuRJmER1NGmnnoFbfZyG1k7nQpEdXA"
